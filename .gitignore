@@ -28,3 +28,6 @@ CoverageReport*
 LastCoverageResults.log
 artifacts/
 .idea/
+/cmake-build
+/vs2019/PdfTest/x64/
+/vs2019/SumatraPdfAPI/x64

@@ -284,6 +284,7 @@ class EnginePdf : public EngineBase {
     RectD PageMediabox(int pageNo) override;
     RectD PageContentBox(int pageNo, RenderTarget target = RenderTarget::View) override;
 
+    SimpleBitmap* RenderPageToBitmap(RenderPageArgs& args);
     RenderedBitmap* RenderPage(RenderPageArgs& args) override;
 
     RectD Transform(RectD rect, int pageNo, float zoom, int rotation, bool inverse = false) override;
@@ -1206,6 +1207,122 @@ RenderedBitmap* EnginePdf::RenderPage(RenderPageArgs& args) {
     return bitmap;
 }
 
+SimpleBitmap* EnginePdf::RenderPageToBitmap(RenderPageArgs& args) {
+    // Shaman:
+    // A lot of code duplication of the code above,
+    // but I don't care right now
+    
+    auto pageNo = args.pageNo;
+
+    FzPageInfo* pageInfo = GetFzPageInfo(pageNo);
+    fz_page* page = pageInfo->page;
+    pdf_page* pdfpage = pdf_page_from_fz_page(ctx, page);
+
+    if (!page || !pageInfo->list) {
+        return nullptr;
+    }
+
+    int transparency = pdfpage->transparency;
+
+    fz_cookie* fzcookie = nullptr;
+    FitzAbortCookie* cookie = nullptr;
+    if (args.cookie_out) {
+        cookie = new FitzAbortCookie();
+        *args.cookie_out = cookie;
+        fzcookie = &cookie->cookie;
+    }
+
+    // TODO(port): I don't see why this lock is needed
+    ScopedCritSec cs(ctxAccess);
+
+    auto pageRect = args.pageRect;
+    auto zoom = args.zoom;
+    auto rotation = args.rotation;
+    fz_rect pRect;
+    if (pageRect) {
+        pRect = RectD_to_fz_rect(*pageRect);
+    } else {
+        // TODO(port): use pageInfo->mediabox?
+        pRect = fz_bound_page(ctx, page);
+    }
+    fz_matrix ctm = viewctm(page, zoom, rotation);
+    fz_irect bbox = fz_round_rect(fz_transform_rect(pRect, ctm));
+
+    fz_colorspace* colorspace = fz_device_rgb(ctx);
+    fz_irect ibounds = bbox;
+    fz_rect cliprect = fz_rect_from_irect(bbox);
+
+    fz_pixmap* pix = nullptr;
+    fz_device* dev = NULL;
+    SimpleBitmap* bitmap = nullptr;
+
+    fz_var(dev);
+    fz_var(pix);
+    fz_var(bitmap);
+
+    Vec<PageAnnotation> pageAnnots = fz_get_user_page_annots(userAnnots, pageNo);
+
+    fz_try(ctx) {
+        pix = fz_new_pixmap_with_bbox(ctx, colorspace, ibounds, nullptr, 1);
+        // initialize with white background
+        fz_clear_pixmap_with_value(ctx, pix, 0xff);
+
+        // TODO: in printing different style. old code use pdf_run_page_with_usage(), with usage ="View"
+        // or "Print". "Export" is not used
+        dev = fz_new_draw_device(ctx, fz_identity, pix);
+        // TODO: use fz_infinite_rect instead of cliprect?
+        fz_run_page_transparency(ctx, pageAnnots, dev, cliprect, false, transparency);
+        fz_run_display_list(ctx, pageInfo->list, dev, ctm, cliprect, fzcookie);
+        fz_run_page_transparency(ctx, pageAnnots, dev, cliprect, true, transparency);
+        fz_run_user_page_annots(ctx, pageAnnots, dev, ctm, cliprect, fzcookie);
+
+        const auto convertToBitmap = [](fz_context* ctx, fz_pixmap* pixmap) -> SimpleBitmap* {
+            fz_pixmap* rgbPixmap = nullptr;
+            fz_var(rgbPixmap);
+            fz_try(ctx) {
+                fz_irect bbox = fz_pixmap_bbox(ctx, pixmap);
+                fz_colorspace* csdest = fz_device_rgb(ctx);
+                fz_color_params cp = fz_default_color_params;
+                rgbPixmap = fz_convert_pixmap2(ctx, pixmap, csdest, nullptr, nullptr, cp, 1);
+            }
+            fz_catch(ctx) {
+                return nullptr;
+            }
+            if (!rgbPixmap || !rgbPixmap->samples) {
+                return nullptr;
+            }
+
+            int w = rgbPixmap->w;
+            int h = rgbPixmap->h;
+            int n = rgbPixmap->n;
+            int stride = rgbPixmap->stride;
+            unsigned char* data = new unsigned char[w * h * n];
+            //step through the lines, invert y
+            for (int y = 0; y < h; ++y)
+                memcpy(data + y * w * n, rgbPixmap->samples + (h-y-1) * stride, w * n);
+            return new SimpleBitmap{w, h, n, data};
+        };
+        bitmap = convertToBitmap(ctx, pix);
+
+        fz_close_device(ctx, dev);
+    }
+    fz_always(ctx) {
+        if (dev) {
+            fz_drop_device(ctx, dev);
+        }
+        fz_drop_pixmap(ctx, pix);
+    }
+    fz_catch(ctx) {
+        delete bitmap;
+        return nullptr;
+    }
+    return bitmap;
+}
+SimpleBitmap* EnginePdfRenderPageToBitmap(EngineBase* engine, RenderPageArgs& args) {
+    EnginePdf* e = reinterpret_cast<EnginePdf*>(engine); //dynamic cast is not allowed because of /GR-
+    return e->RenderPageToBitmap(args);
+}
+
 PageElement* EnginePdf::GetElementAtPos(int pageNo, PointD pt) {
     FzPageInfo* pageInfo = GetFzPageInfo(pageNo);
     return FzGetElementAtPos(pageInfo, pt);
@@ -2024,3 +2141,4 @@ EngineBase* CreateEnginePdfFromFile(const WCHAR* fileName, PasswordUI* pwdUI) {
 EngineBase* CreateEnginePdfFromStream(IStream* stream, PasswordUI* pwdUI) {
     return EnginePdf::CreateFromStream(stream, pwdUI);
 }
+

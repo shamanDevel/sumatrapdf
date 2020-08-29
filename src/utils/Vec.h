@@ -742,8 +742,8 @@ bool vectorContains(const std::vector<T>& v, const T el) {
 // remove el from a vector
 template <typename T>
 void vectorRemove(std::vector<T>& v, const T el) {
-    auto b = std::begin(gWindows);
-    auto e = std::end(gWindows);
+    auto b = std::begin(v);
+    auto e = std::end(v);
     // TODO: does it work if element doesn't exist in vector?
     v.erase(std::remove(b, e, el), e);
 }
